@@ -522,6 +522,9 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
    int cbtx_size;
    uchar *cbtx = NULL;
    int tx_count, tx_size;
+   int owner_script_size = 0;
+   int64_t owner_reward = 0;
+   uchar owner_script[100];
    uchar txc_vi[9];
    uchar(*merkle_tree)[32] = NULL;
    bool coinbase_append = false;
@@ -530,6 +533,7 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
    bool version_reduce = false;
    json_t *tmp, *txa;
    bool rc = false;
+   size_t owner_script_hex_size = 0;
    int i, n;
    bool segwit = false;
 
@@ -658,6 +662,11 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
    tmp = json_object_get( val, "coinbasetxn" );
    if ( tmp )
    {
+      if ( json_object_get( val, "yitcoin_owner_reward" ) )
+      {
+         applog( LOG_ERR, "GBT coinbasetxn cannot be used with the Yitcoin owner reward" );
+         goto out;
+      }
       const char *cbtx_hex = json_string_value( json_object_get( tmp, "data" ));
       cbtx_size = cbtx_hex ? (int) strlen( cbtx_hex ) / 2 : 0;
       cbtx = (uchar*) malloc( cbtx_size + 100 );
@@ -689,31 +698,80 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
       }
       cbvalue = (int64_t) ( json_is_integer( tmp ) ? json_integer_value( tmp )
                                                    : json_number_value( tmp ) );
-      cbtx = (uchar*) malloc(256);
+      tmp = json_object_get( val, "yitcoin_owner_reward" );
+      if ( tmp )
+      {
+         json_t *script = json_object_get( val, "yitcoin_owner_script" );
+         const char *script_hex = json_is_string( script )
+                                  ? json_string_value( script ) : NULL;
+         if ( !json_is_integer( tmp ) || !script_hex )
+         {
+            applog( LOG_ERR, "JSON invalid Yitcoin owner reward fields" );
+            goto out;
+         }
+         owner_reward = json_integer_value( tmp );
+         owner_script_hex_size = strlen( script_hex );
+         if ( owner_reward <= 0 || owner_reward > cbvalue ||
+              owner_script_hex_size == 0 || ( owner_script_hex_size & 1 ) ||
+              owner_script_hex_size > sizeof(owner_script) * 2 )
+         {
+            applog( LOG_ERR, "JSON invalid Yitcoin owner reward or script" );
+            goto out;
+         }
+         owner_script_size = (int) ( owner_script_hex_size / 2 );
+         if ( !hex2bin( owner_script, script_hex, owner_script_size ) )
+         {
+            applog( LOG_ERR, "JSON invalid Yitcoin owner reward or script" );
+            goto out;
+         }
+      }
+      else if ( json_object_get( val, "yitcoin_owner_script" ) )
+      {
+         applog( LOG_ERR, "JSON missing Yitcoin owner reward amount" );
+         goto out;
+      }
+      cbvalue -= owner_reward;
+      cbtx = (uchar*) malloc(512);
       le32enc( (uint32_t *)cbtx, 1 ); /* version */
       cbtx[4] = 1; /* in-counter */
       memset( cbtx+5, 0x00, 32 ); /* prev txout hash */
       le32enc( (uint32_t *)(cbtx+37), 0xffffffff ); /* prev txout index */
       cbtx_size = 43;
       /* BIP 34: height in coinbase */
-      for ( n = work->height; n; n >>= 8 )
-         cbtx[cbtx_size++] = n & 0xff;
-      /* If the last byte pushed is >= 0x80, then we need to add
-         another zero byte to signal that the block height is a
-         positive number.  */
-      if (cbtx[cbtx_size - 1] & 0x80)
-         cbtx[cbtx_size++] = 0;
-      cbtx[42] = cbtx_size - 43;
+      if ( work->height >= 1 && work->height <= 16 )
+      {
+         cbtx[42] = 0x50 + work->height; /* minimal OP_1 through OP_16 */
+         cbtx[cbtx_size++] = 0; /* coinbase scriptSig must be at least two bytes */
+      }
+      else
+      {
+         for ( n = work->height; n; n >>= 8 )
+            cbtx[cbtx_size++] = n & 0xff;
+         /* Preserve the sign bit for positive heights. */
+         if (cbtx[cbtx_size - 1] & 0x80)
+            cbtx[cbtx_size++] = 0;
+         cbtx[42] = cbtx_size - 43;
+      }
       cbtx[41] = cbtx_size - 42; /* scriptsig length */
       le32enc( (uint32_t *)( cbtx+cbtx_size ), 0xffffffff ); /* sequence */
       cbtx_size += 4;
-      cbtx[cbtx_size++] = segwit ? 2 : 1; /* out-counter */
+      cbtx[cbtx_size++] = (segwit ? 2 : 1) + (owner_reward > 0 ? 1 : 0); /* out-counter */
       le32enc( (uint32_t *)( cbtx+cbtx_size) , (uint32_t)cbvalue ); /* value */
       le32enc( (uint32_t *)( cbtx+cbtx_size+4 ), cbvalue >> 32 );
       cbtx_size += 8;
       cbtx[ cbtx_size++ ] = (uint8_t) pk_script_size; /* txout-script length */
       memcpy( cbtx+cbtx_size, pk_script, pk_script_size );
       cbtx_size += (int) pk_script_size;
+
+      if ( owner_reward > 0 )
+      {
+         le32enc( (uint32_t *)( cbtx+cbtx_size ), (uint32_t)owner_reward );
+         le32enc( (uint32_t *)( cbtx+cbtx_size+4 ), (uint32_t)(owner_reward >> 32) );
+         cbtx_size += 8;
+         cbtx[ cbtx_size++ ] = (uint8_t) owner_script_size;
+         memcpy( cbtx+cbtx_size, owner_script, owner_script_size );
+         cbtx_size += owner_script_size;
+      }
 
        if ( segwit )
        {
@@ -1495,7 +1553,7 @@ static bool submit_upstream_work( CURL *curl, struct work *work )
 const char *getwork_req =
 	"{\"method\": \"getwork\", \"params\": [], \"id\":0}\r\n";
 
-#define GBT_CAPABILITIES "[\"coinbasetxn\", \"coinbasevalue\", \"longpoll\", \"workid\"]"
+#define GBT_CAPABILITIES "[\"coinbasetxn\", \"coinbasevalue\", \"longpoll\", \"workid\", \"yitcoin-owner-reward\"]"
 
 #define GBT_RULES "[\"segwit\"]"
 
