@@ -873,9 +873,26 @@ static bool gbt_work_decode( const json_t *val, struct work *work )
    }
 
    n = varint_encode( txc_vi, 1 + tx_count );
-   work->txs = (char*) malloc( 2 * ( n + cbtx_size + tx_size ) + 1 );
+   /* The merkle root uses the non-witness coinbase below, but submitblock
+    * must carry its witness reserved value when a commitment is present. */
+   work->txs = (char*) malloc( 2 * ( n + cbtx_size + tx_size + (segwit ? 36 : 0) ) + 1 );
    bin2hex( work->txs, txc_vi, n );
-   bin2hex( work->txs + 2*n, cbtx, cbtx_size );
+   if ( segwit )
+   {
+      uchar *wire_cbtx = (uchar*) malloc( cbtx_size + 36 );
+      memcpy( wire_cbtx, cbtx, 4 );
+      wire_cbtx[4] = 0; /* witness marker */
+      wire_cbtx[5] = 1; /* witness flag */
+      memcpy( wire_cbtx + 6, cbtx + 4, cbtx_size - 8 );
+      wire_cbtx[cbtx_size - 2] = 1; /* one witness stack item */
+      wire_cbtx[cbtx_size - 1] = 32; /* 32-byte reserved value */
+      memset( wire_cbtx + cbtx_size, 0, 32 );
+      memcpy( wire_cbtx + cbtx_size + 32, cbtx + cbtx_size - 4, 4 );
+      bin2hex( work->txs + 2*n, wire_cbtx, cbtx_size + 36 );
+      free( wire_cbtx );
+   }
+   else
+      bin2hex( work->txs + 2*n, cbtx, cbtx_size );
 
    /* generate merkle root */
    merkle_tree = (uchar(*)[32]) calloc( ( (1 + tx_count + 1) & ~1 ), 32 );

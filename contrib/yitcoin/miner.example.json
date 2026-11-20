@@ -1,0 +1,8 @@
+{
+  "algo": "sha256d",
+  "url": "http://127.0.0.1:29432",
+  "user": "REPLACE_WITH_SERVER_MINER_RPC_USER",
+  "pass": "REPLACE_LOCALLY_WITH_SERVER_MINER_RPC_PASSWORD",
+  "coinbase-addr": "REPLACE_WITH_YOUR_YTC_RECEIVING_ADDRESS",
+  "threads": 2
+}
