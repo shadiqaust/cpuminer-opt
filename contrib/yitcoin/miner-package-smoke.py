@@ -8,6 +8,7 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -144,7 +145,15 @@ def main():
             path = Path(directory) / "fixture.json"
             path.write_text(json.dumps(config))
             with open("miner-smoke.log", "w+") as log:
-                process = subprocess.Popen([executable, "--config=" + str(path)], stdout=log, stderr=log)
+                environment = os.environ.copy()
+                if os.name == "nt":
+                    # Prove the packaged DLLs are enough; do not accidentally
+                    # resolve missing dependencies from the MSYS2 toolchain.
+                    root = environment.get("SystemRoot", r"C:\Windows")
+                    environment["PATH"] = os.pathsep.join(
+                        [str(Path(executable).parent), str(Path(root) / "System32"), root])
+                process = subprocess.Popen([executable, "--config=" + str(path)],
+                                           stdout=log, stderr=log, env=environment)
                 try:
                     deadline = time.monotonic() + 60
                     while not done.wait(0.1):

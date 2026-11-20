@@ -3,7 +3,20 @@ name: Yitcoin native miner packages
 on:
   push:
     branches: [ci/yitcoin-miner-packages]
+    paths:
+      - cpu-miner.c
+      - algo/**
+      - simd-utils/**
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Build all platforms or retry Windows only
+        required: true
+        type: choice
+        options:
+          - all
+          - windows-x86_64
+        default: all
 
 permissions:
   contents: read
@@ -16,15 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: linux-x86_64
-            os: ubuntu-24.04
-          - platform: windows-x86_64
-            os: windows-2022
-          - platform: macos-x86_64
-            os: macos-15-intel
-          - platform: macos-arm64
-            os: macos-15
+        include: ${{ fromJSON(inputs.platform == 'windows-x86_64' && '[{"platform":"windows-x86_64","os":"windows-2022"}]' || '[{"platform":"linux-x86_64","os":"ubuntu-24.04"},{"platform":"windows-x86_64","os":"windows-2022"},{"platform":"macos-x86_64","os":"macos-15-intel"},{"platform":"macos-arm64","os":"macos-15"}]') }}
     defaults:
       run:
         shell: bash
@@ -123,6 +128,7 @@ jobs:
           mkdir -p "$dest"
           cp cpuminer.exe "$dest/"
           ntldd -R cpuminer.exe > dependencies.txt
+          python contrib/yitcoin/test-bundle-windows.py
           python contrib/yitcoin/bundle-windows.py "$dest" dependencies.txt
           cp COPYING "$dest/COPYING.txt"
           cp contrib/yitcoin/DOWNLOAD-AND-MINE.md "$dest/README.md"
