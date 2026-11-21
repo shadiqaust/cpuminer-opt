@@ -1,0 +1,159 @@
+name: Yitcoin native miner packages
+
+on:
+  push:
+    branches: [ci/yitcoin-miner-packages]
+    paths:
+      - cpu-miner.c
+      - algo/**
+      - simd-utils/**
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Build all platforms or retry Windows only
+        required: true
+        type: choice
+        options:
+          - all
+          - windows-x86_64
+        default: all
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.platform == 'windows-x86_64' && '[{"platform":"windows-x86_64","os":"windows-2022"}]' || '[{"platform":"linux-x86_64","os":"ubuntu-24.04"},{"platform":"windows-x86_64","os":"windows-2022"},{"platform":"macos-x86_64","os":"macos-15-intel"},{"platform":"macos-arm64","os":"macos-15"}]') }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        if: runner.os != 'Windows'
+        with:
+          python-version: "3.13"
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential automake autoconf libtool pkg-config \
+            libcurl4-openssl-dev libjansson-dev libssl-dev libgmp-dev zlib1g-dev patchelf
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install gcc automake autoconf libtool pkg-config curl jansson gmp dylibbundler
+      - name: Install Windows MinGW dependencies
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git make autoconf automake libtool
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-curl mingw-w64-x86_64-jansson
+            mingw-w64-x86_64-gmp mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-python mingw-w64-x86_64-ntldd
+      - name: Build Linux miner
+        if: runner.os == 'Linux'
+        run: |
+          ./autogen.sh
+          CFLAGS="-O2 -march=x86-64 -msse2" ./configure --with-curl --disable-assembly
+          make -j2
+      - name: Build macOS miner
+        if: runner.os == 'macOS'
+        run: |
+          gcc_bin="$(find "$(brew --prefix gcc)/bin" -maxdepth 1 -name 'gcc-[0-9]*' | head -1)"
+          gxx_bin="${gcc_bin/gcc-/g++-}"
+          test -x "$gcc_bin"
+          test -x "$gxx_bin"
+          export CC="$gcc_bin" CXX="$gxx_bin"
+          export CPPFLAGS="-I$(brew --prefix)/include -I$(brew --prefix curl)/include"
+          export LDFLAGS="-L$(brew --prefix)/lib -L$(brew --prefix curl)/lib"
+          export PKG_CONFIG_PATH="$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
+          flags="-O2 -march=x86-64 -msse2"
+          if [[ "$(uname -m)" == arm64 ]]; then flags="-O2 -march=armv8-a+crypto"; fi
+          ./autogen.sh
+          CFLAGS="$flags" ./configure --with-curl --disable-assembly
+          make -j2
+      - name: Build Windows miner
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          ./autogen.sh
+          CFLAGS="-O2 -march=x86-64 -msse2" ./configure --with-curl --disable-assembly
+          make -j2
+      - name: Package Linux and macOS runtime libraries
+        if: runner.os != 'Windows'
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          dest="dist/yitcoin-miner-$PLATFORM"
+          mkdir -p "$dest/lib"
+          cp cpuminer "$dest/"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            python3 contrib/yitcoin/bundle-linux.py "$dest"
+          else
+            dylibbundler -od -b -x "$dest/cpuminer" -d "$dest/lib" -p @executable_path/lib/
+            # Re-sign after rewriting load commands, including on Apple Silicon.
+            find "$dest/lib" -type f -exec codesign --force --sign - {} \;
+            codesign --force --sign - "$dest/cpuminer"
+            otool -L "$dest/cpuminer"
+          fi
+          cp COPYING "$dest/COPYING.txt"
+          cp contrib/yitcoin/DOWNLOAD-AND-MINE.md "$dest/README.md"
+          cp contrib/yitcoin/miner.example.json "$dest/"
+          git rev-parse HEAD > "$dest/SOURCE_COMMIT.txt"
+          python3 contrib/yitcoin/miner-package-smoke.py "$dest/cpuminer"
+          tar -czf "$dest.tar.gz" -C dist "$(basename "$dest")"
+          python3 contrib/yitcoin/checksum.py "$dest.tar.gz"
+      - name: Package and smoke-test Windows executable
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          dest="dist/yitcoin-miner-$PLATFORM"
+          mkdir -p "$dest"
+          cp cpuminer.exe "$dest/"
+          ntldd -R cpuminer.exe > dependencies.txt
+          python contrib/yitcoin/test-bundle-windows.py
+          python contrib/yitcoin/bundle-windows.py "$dest" dependencies.txt
+          cp COPYING "$dest/COPYING.txt"
+          cp contrib/yitcoin/DOWNLOAD-AND-MINE.md "$dest/README.md"
+          cp contrib/yitcoin/miner.example.json "$dest/"
+          git rev-parse HEAD > "$dest/SOURCE_COMMIT.txt"
+          python contrib/yitcoin/miner-package-smoke.py "$dest/cpuminer.exe"
+          python -c 'import shutil; shutil.make_archive("dist/yitcoin-miner-windows-x86_64", "zip", "dist", "yitcoin-miner-windows-x86_64")'
+          python contrib/yitcoin/checksum.py "$dest.zip"
+      - name: Upload tested miner download
+        uses: actions/upload-artifact@v7
+        with:
+          name: yitcoin-miner-${{ matrix.platform }}-${{ github.run_id }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: miner-diagnostics-${{ matrix.platform }}-${{ github.run_id }}
+          path: |
+            config.log
+            dependencies.txt
+            miner-smoke.log
+          if-no-files-found: ignore
