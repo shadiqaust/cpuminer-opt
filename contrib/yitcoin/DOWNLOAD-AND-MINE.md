@@ -51,7 +51,7 @@ For a Windows/Mac miner using your Linux node, keep RPC on the Linux loopback
 address. Open a separate terminal and keep this SSH tunnel running:
 
 ```bash
-ssh -N -L 127.0.0.1:29432:127.0.0.1:19432 yitcoin@185.182.8.84
+ssh -N -L 127.0.0.1:29432:127.0.0.1:19432 yitcoin@seed.yitcoin.com
 ```
 
 Use your actual account/server if different. This command also works in Windows
