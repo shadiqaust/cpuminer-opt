@@ -65,7 +65,7 @@ Copy `miner.example.json` to `miner.json` and edit it locally:
   `http://127.0.0.1:19432` when hashing on the Linux node itself.
 - `user` and `pass`: the dedicated **Linux node miner RPC account**,
   not your SSH login. That account needs getblocktemplate/submitblock access.
-- `coinbase-addr`: your public YTC wallet receiving address.
+- `coinbase-addr`: your public YITC wallet receiving address.
 - `threads`: begin with 2 and monitor CPU temperature.
 
 Never share or commit `miner.json`: it contains a password. This miner does
